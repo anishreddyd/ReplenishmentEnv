@@ -7,6 +7,7 @@ from modules.critics import REGISTRY as critic_resigtry
 from utils.rl_utils import build_gae_targets, build_gae_targets_with_T
 from utils.value_norm import ValueNorm
 import wandb
+from modules.critics.graph_mixer import GraphMixer
 
 
 class LocalPPOLearner:
@@ -27,6 +28,14 @@ class LocalPPOLearner:
         # dummy_args.n_actions = 1
         # self.critic = NMAC(scheme, None, dummy_args)
         self.critic = critic_resigtry[args.critic_type](scheme, args)
+        if args.critic_type == "graph_mix":
+            self.critic = GraphMixer(
+                        node_dim = args.node_feat_dim,
+                        edge_dim = args.edge_attr_dim,
+                        hidden_dim = args.gnn_hidden_dim
+            )
+        else:
+            self.critic = critic_resigtry[args.critic_type](scheme, args)
         self.params = list(self.mac.parameters()) + list(self.critic.parameters())
 
         self.optimiser = Adam(params=self.params, lr=args.lr)

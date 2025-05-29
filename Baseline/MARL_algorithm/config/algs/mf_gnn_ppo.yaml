@@ -1,0 +1,87 @@
+# ----------------------------------------------------------------------
+# ======== Evaluation and Logging ========
+# (unchanged from IPPO)
+# ----------------------------------------------------------------------
+test_greedy: True
+test_nepisode: 10
+test_interval: 50000
+log_interval: 10000
+visualize: False
+visualize_interval: 500000
+learner_log_interval: 10000
+save_model: True
+save_model_interval: 1460000
+checkpoint_path: ""
+evaluate: False
+
+# ----------------------------------------------------------------------
+# ======== Sampling ========
+# ----------------------------------------------------------------------
+runner: "parallel"
+batch_size: 8
+batch_size_run: 8
+buffer_size: 8
+buffer_cpu_only: True
+
+# ----------------------------------------------------------------------
+# ======== Algorithm ========
+# ----------------------------------------------------------------------
+name: "mf_gnn_ppo"
+run:  "ippo_run"
+use_cuda: True
+seed: 101
+t_max: 5020000
+
+action_selector: "multinomial"
+mask_before_softmax: True
+
+learner: "local_ppo_learner"
+critic_type: "graph_mix"
+critic_input_seq_str: "o"
+
+mac: "graph_mac"
+agent: "n_rnn"      # unused by mf_gnn_ppo
+
+use_layer_norm: True
+use_orthogonal: True
+agent_output_type: "pi_logits"
+actor_input_seq_str: "o_la"
+obs_last_action: True
+obs_agent_id: False
+
+# keep this here for completeness (IPPO’s networks won’t be used)
+hidden_dim: 128
+
+gamma: 0.985
+optim: "Adam"
+lr: 5e-4
+optim_alpha: 0.99
+optim_eps: 1e-5
+grad_norm_clip: 10
+
+critic_coef: 0.5
+entropy_coef: 0.01
+gae_lambda: 0.95
+mini_epochs: 2
+eps_clip: 0.15
+
+# ----------------------------------------------------------------------
+# ======== MF-GNN-specific Hyper-parameters ========
+# ----------------------------------------------------------------------
+node_feat_dim:    16
+edge_attr_dim:    4
+gnn_hidden_dim:   64    # << renamed
+n_actions:        34
+
+# ----------------------------------------------------------------------
+# ======== Other Sampling Flags ========
+# ----------------------------------------------------------------------
+use_n_lambda: False
+n_lambda: 51
+use_individual_rewards: True
+use_mean_team_reward: True
+use_reward_normalization: False
+use_loss_normalization: False
+use_single_lambda_sampling: False
+sampling_lambda_index: 0
+use_sample_prob_weights: True

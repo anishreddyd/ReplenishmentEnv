@@ -1,3 +1,5 @@
+from Baseline. MARL_algorithm. controllers. graph_mac import GraphMAC
+
 REGISTRY = {}
 
 from .basic_controller import BasicMAC
@@ -13,3 +15,4 @@ REGISTRY["dqn_mac"] = DQNMAC
 REGISTRY["ldqn_mac"] = LDQNMAC
 REGISTRY["whittle_disc_mac"] = WhittleDiscreteMAC
 REGISTRY["whittle_cont_mac"] = WhittleContinuousMAC
+REGISTRY["graph_mac"]    = GraphMAC

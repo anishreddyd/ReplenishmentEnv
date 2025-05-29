@@ -2,6 +2,8 @@ import os
 
 from ReplenishmentEnv.env.replenishment_env import ReplenishmentEnv
 from ReplenishmentEnv.wrapper.default_wrapper import DefaultWrapper
+from ReplenishmentEnv.wrapper.graph_wrapper import GraphWrapper
+from ReplenishmentEnv.wrapper.curriculum_wrapper import CurriculumWrapper
 from ReplenishmentEnv.wrapper.dynamic_wrapper import DynamicWrapper
 from ReplenishmentEnv.wrapper.history_wrapper import HistoryWrapper
 from ReplenishmentEnv.wrapper.observation_wrapper import ObservationWrapper

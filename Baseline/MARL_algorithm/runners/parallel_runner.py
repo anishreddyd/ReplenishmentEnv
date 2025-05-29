@@ -152,7 +152,7 @@ class ParallelRunner:
 
         while True:
 
-            if self.args.mac == "mappo_mac":
+            if self.args.mac == "mappo_mac" or self.args.mac == "graph_mac":
                 mac_output = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, 
                     bs=envs_not_terminated, test_mode=test_mode)
             elif self.args.mac == "dqn_mac" or self.args.mac == "ldqn_mac":

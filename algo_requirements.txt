@@ -9,3 +9,4 @@ wandb
 torch
 sacred
 pyecharts
+torch-geometric==2.3.1

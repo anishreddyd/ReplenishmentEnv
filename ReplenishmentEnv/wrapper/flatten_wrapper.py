@@ -10,8 +10,11 @@ class FlattenWrapper(gym.Wrapper):
         self.agent_count = self.sku_count * self.warehouse_count
     
     def reset(self) -> None:
+
         states = self.env.reset()
+        print(f"[FlattenWrapper] reset: before shape = {states.shape}")
         states = states.reshape((self.agent_count, -1))
+        print(f"[FlattenWrapper] reset: flattened states shape = {states.shape}")
         return states
 
     def step(self, actions: np.array) -> Tuple[np.array, np.array, list, dict]:

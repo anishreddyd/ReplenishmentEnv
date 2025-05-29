@@ -83,7 +83,7 @@ class ReplenishmentEnv(MultiAgentEnv):
                             "action" : {"mode": "demand_mean_discrete",
                                         "space": action_space}
                         } 
-        env_base = make_env(task_type, wrapper_names = ["ObservationWrapper4OldCode", "FlattenWrapper", "OracleWrapper"], 
+        env_base = make_env(task_type, wrapper_names = ["ObservationWrapper4OldCode", "FlattenWrapper", "OracleWrapper", "GraphWrapper",  "CurriculumWrapper"],
                             mode=mode, vis_path=vis_path, update_config=update_config)
         sampler_seq_len = env_base.config['env']['horizon']
         self.episode_limit = min(time_limit, sampler_seq_len)
@@ -94,7 +94,7 @@ class ReplenishmentEnv(MultiAgentEnv):
             env_base,
             max_episode_steps = sampler_seq_len,
         )
-        self._env = FlattenObservation(self._env)
+        # self._env = FlattenObservation(self._env) // Commenting as to preserve graph structure.
         self.n_warehouses = self._env.n_warehouses
         self.n_agents = self._env.get_agent_count()
         self._obs = None
