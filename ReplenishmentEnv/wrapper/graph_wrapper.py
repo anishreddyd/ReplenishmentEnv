@@ -1,87 +1,67 @@
-# file: ReplenishmentEnv/wrapper/graph_wrapper.py
+# file: Baseline/MARL_algorithm/envs/replenishment/ReplenishmentEnv.py
 import gym
 import torch
 import numpy as np
 from typing import Tuple
 
-
 class GraphWrapper(gym.Wrapper):
     """
-    Wrap the MABIM env so that instead of returning a flat obs array per agent,
-    we return a dict suitable for PyG:
-     - node_feats: [N_agents, feat_dim]
-     - edge_index: [2,  E]
-     - edge_attr:  [E,    1]  (the lead-time along that edge)
-     - batch:      [N_agents] zeros
+    *Pass-through* wrapper: always returns the EXACT same (obs,state) tuple
+    that the upstream wrappers did, so your multi-agent stack never breaks.
+    Meanwhile, on the first reset() we pull out agent_states and build
+    edge_index/edge_attr/batch for your MAC to fetch via get_graph().
     """
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
-        # how many SKUs and warehouses?
-        self.num_skus = len(self.env.sku_list)
-        self.num_wh = self.env.supply_chain.get_warehouse_count()
-        self.n_agents = self.num_skus * self.num_wh
+        self._built = False
+        self.edge_index = None
+        self.edge_attr  = None
+        self.batch      = None
 
-        # build a static edge list: for each SKU, connect wh j ↔ wh j+1
-        edge_list = []
-        edge_attr = []
-        for sku in range(self.num_skus):
-            for wh in range(self.num_wh - 1):
-                u = wh * self.num_skus + sku
-                v = (wh + 1) * self.num_skus + sku
+    def _build_graph(self):
+        # underlying MABIM env has agent_states ready after that first reset()
+        num_skus = len(self.env.sku_list)
+        num_wh   = self.env.supply_chain.get_warehouse_count()
+        n_agents = num_skus * num_wh
 
-                # you can pull real lead-times if available,
-                # here we just read the env’s vlt for that SKU/warehouse
-                lead = float(self.env.agent_states["all_warehouses", "vlt", -1, sku][wh])
+        vlt = self.env.agent_states["all_warehouses", "vlt"]  # (num_wh,num_skus)
+        edges, attrs = [], []
+        for sku in range(num_skus):
+            for wh in range(num_wh-1):
+                u = wh*num_skus + sku
+                v = (wh+1)*num_skus + sku
+                lead = float(vlt[wh,sku])
+                edges.append([u,v]); attrs.append([lead])
+                edges.append([v,u]); attrs.append([lead])
 
-                # add both directions
-                edge_list.append([u, v]);
-                edge_attr.append([lead])
-                edge_list.append([v, u]);
-                edge_attr.append([lead])
+        self.edge_index = torch.tensor(edges, dtype=torch.long).T    # [2, E]
+        self.edge_attr  = torch.tensor(attrs, dtype=torch.float32)  # [E, 1]
+        self.batch      = torch.zeros(n_agents, dtype=torch.long)   # single graph
 
-        self.edge_index = torch.tensor(edge_list, dtype=torch.long).T  # [2, E]
-        self.edge_attr = torch.tensor(edge_attr, dtype=torch.float32)  # [E,1]
-        # batch is always zeros (one graph)
-        self.batch = None  # we'll create on the fly
-
-    def reset(self) -> Tuple[dict, ...]:
-        # flatten-wrapper, oracle, etc all have already padded obs to shape [N_agents, feat_dim]
+    def reset(self) -> Tuple[np.ndarray, np.ndarray]:
+        # upstream returns exactly (obs,state)
         obs, state = self.env.reset()
-        return self._make_graph_obs(obs), state
+        if not self._built:
+            self._build_graph()
+            self._built = True
+        return obs, state
 
-    def step(self, actions: np.ndarray) -> Tuple[dict, float, list, dict]:
-        obs, reward, done, info = self.env.step(actions)
-        return self._make_graph_obs(obs), reward, done, info
+    def step(self, action: np.ndarray):
+        # proxy everything
+        return self.env.step(action)
 
-    def _make_graph_obs(self, obs: np.ndarray) -> dict:
-        """
-        obs is an (N_agents, feat_dim) array.
-        We convert to node_feats tensor, and tack on edges.
-        """
-        node_feats = torch.tensor(obs, dtype=torch.float32)  # [N_agents, feat_dim]
-        # create batch vector once
-        if self.batch is None:
-            self.batch = torch.zeros(self.n_agents, dtype=torch.long)
+    def get_graph(self) -> dict:
+        assert self._built, "GraphWrapper.get_graph() called before reset()"
         return {
-            "node_feats": node_feats,
             "edge_index": self.edge_index,
-            "edge_attr": self.edge_attr,
-            "batch": self.batch,
+            "edge_attr":  self.edge_attr,
+            "batch":      self.batch
         }
 
-    # proxy through all other methods
-    def render(self, *args, **kwargs):
-        return self.env.render(*args, **kwargs)
-
-    def close(self):
-        return self.env.close()
-
-    def seed(self, *args, **kwargs):
-        return self.env.seed(*args, **kwargs)
-
-    def get_env_info(self):
-        return self.env.get_env_info()
-
-    def get_stats(self):
-        return self.env.get_stats()
+    # pass‐throughs
+    def render(self,*a,**k): return self.env.render(*a,**k)
+    def close(self):       return self.env.close()
+    def seed(self,*a,**k): return self.env.seed(*a,**k)
+    def get_env_info(self):return self.env.get_env_info()
+    def get_stats(self):   return self.env.get_stats()

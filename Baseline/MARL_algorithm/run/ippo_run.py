@@ -91,6 +91,9 @@ def run_sequential(args, logger):
     args.n_agents = env_info["n_agents"]
     args.n_actions = env_info["n_actions"]
     args.state_shape = env_info["state_shape"]
+    if args.mac == "graph_mac":
+        args.node_feat_dim = env_info["obs_shape"]  # <-- int
+        args.edge_attr_dim = 1
     args.accumulated_episodes = getattr(args, "accumulated_episodes", None)
 
     scheme = {
@@ -132,8 +135,11 @@ def run_sequential(args, logger):
     logger.console_logger.info("MDP Components:")
     print(pd.DataFrame(buffer.scheme).transpose().sort_index().fillna("").to_markdown())
 
-    # Setup multiagent controller here
-    mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
+    if args.mac == "graph_mac":
+    # runner.env holds the env instance (GraphWrapper is in its wrapper chain)
+        mac = mac_REGISTRY[args.mac](runner.env, buffer.scheme, groups, args)
+    else:
+        mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
             
     val_args = copy.deepcopy(args)
     val_args.env_args["mode"] = "validation"

@@ -1,6 +1,5 @@
 # ----------------------------------------------------------------------
 # ======== Evaluation and Logging ========
-# (unchanged from IPPO)
 # ----------------------------------------------------------------------
 test_greedy: True
 test_nepisode: 10
@@ -13,13 +12,18 @@ save_model: True
 save_model_interval: 1460000
 checkpoint_path: ""
 evaluate: False
+save_replay: False                      # Saving the replay of the model loaded from checkpoint_path (deprecated)
+local_results_path: "results"           # Path for local results
+use_wandb: True                         # Whether log results to wandb
+wandb_project_name: "whittle_index"     # The project name of the wandb project
+use_tensorboard: False                  # Whether log results to tensorboard
 
 # ----------------------------------------------------------------------
 # ======== Sampling ========
 # ----------------------------------------------------------------------
 runner: "parallel"
-batch_size: 8
-batch_size_run: 8
+batch_size: 2
+batch_size_run: 2
 buffer_size: 8
 buffer_cpu_only: True
 
@@ -33,6 +37,9 @@ seed: 101
 t_max: 5020000
 
 action_selector: "multinomial"
+epsilon_start:   1.0
+epsilon_finish:  0.05
+epsilon_anneal_time: 50000
 mask_before_softmax: True
 
 learner: "local_ppo_learner"
@@ -54,7 +61,7 @@ hidden_dim: 128
 
 gamma: 0.985
 optim: "Adam"
-lr: 5e-4
+lr: 0.0005
 optim_alpha: 0.99
 optim_eps: 1e-5
 grad_norm_clip: 10

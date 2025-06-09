@@ -14,6 +14,7 @@ from components.episode_buffer import EpisodeBatch
 from envs import REGISTRY as env_REGISTRY
 from utils.timehelper import TimeStat
 
+
 # Based (very) heavily on SubprocVecEnv from OpenAI Baselines
 # https://github.com/openai/baselines/blob/master/baselines/common/vec_env/subproc_vec_env.py
 class ParallelRunner:
@@ -21,16 +22,21 @@ class ParallelRunner:
         self.args = args
         self.logger = logger
         self.batch_size = self.args.batch_size_run
-        # Make subprocesses for the envs
-        self.parent_conns, self.worker_conns = zip(
-            *[Pipe() for _ in range(self.batch_size)]
-        )
+
+        # Grab the env-factory and its args
         env_fn = env_REGISTRY[self.args.env]
         env_args = [self.args.env_args.copy() for _ in range(self.batch_size)]
 
+        # === Local env for inspection ===
+        # Use the same kwargs you'll give to workers, wrapped fully
+        self.env = env_fn(**env_args[0])
+        self.env.reset()
+        self.env_fn = env_fn
+
+        # Setup worker pipes and processes
+        self.parent_conns, self.worker_conns = zip(*[Pipe() for _ in range(self.batch_size)])
         for i in range(len(env_args)):
             env_args[i]["seed"] += i
-
         self.ps = [
             Process(
                 target=env_worker,
@@ -42,11 +48,15 @@ class ParallelRunner:
             p.daemon = True
             p.start()
 
+        # Reset each worker once so that env._obs is populated
+        for pc in self.parent_conns:
+            pc.send(("reset", None))
+        for pc in self.parent_conns:
+            _ = pc.recv()
         self.parent_conns[0].send(("get_env_info", None))
         self.env_info = self.parent_conns[0].recv()
         self.episode_limit = self.env_info["episode_limit"]
         self.t = 0
-
         self.t_env = 0
 
         self.train_returns = []
@@ -56,8 +66,17 @@ class ParallelRunner:
         self.train_stats = {}
         self.test_stats = {}
 
-        # self.time_stats = defaultdict(lambda: TimeStat(1000))
         self.log_train_stats_t = -100000
+
+    def _get_all_avail_actions(self):
+        """
+        Ask every worker for its avail_actions mask, then collect them.
+        Returns a list of (n_agents × n_actions) arrays, one per env.
+        """
+        for conn in self.parent_conns:
+            conn.send({"cmd": "get_avail_actions"})
+        # now receive from each
+        return [conn.recv() for conn in self.parent_conns]
 
     def setup(self, scheme, groups, preprocess, mac):
         self.new_batch = partial(
@@ -94,7 +113,7 @@ class ParallelRunner:
 
         for parent_conn in self.parent_conns:
             parent_conn.send(("reset", None))
-            
+
         pre_transition_data = {
             "state": [],
             "avail_actions": [],
@@ -111,7 +130,37 @@ class ParallelRunner:
                 np.zeros([1, self.args.n_agents, self.args.n_actions])
             )
 
+        print(
+            ">>> pre-transition_data['avail_actions'] shapes & sums:",
+            [
+                (
+                    type(a),
+                    np.array(a).shape,
+                    np.array(a).sum()
+                )
+                for a in pre_transition_data["avail_actions"]
+            ]
+        )
+
+        self.batch.update(
+            pre_transition_data,
+            bs = list(range(self.batch_size)),  # explicitly include every env index
+            ts = 0,
+            mark_filled = True  # ensure timestep 0 is marked as present
+        )
         self.batch.update(pre_transition_data, ts=0)
+
+        batch_masks = self.batch["avail_actions"][:, 0, :, :]  # shape [batch, n_agents, n_actions]
+        sums = [bm.sum().item() for bm in batch_masks]
+        print(">>> BATCH avail_actions sums @ t=0:", sums)
+
+        with torch.no_grad():
+            # batch["avail_actions"] is a tensor of shape (bs, T, n_agents, n_actions)
+            ba = self.batch["avail_actions"][:, 0, 0, :]  # for agent-0
+            print(
+                ">>> after update, batch avail_actions sums:",
+                ba.sum(dim=1).cpu().tolist()
+            )
 
         self.t = 0
         self.env_steps_this_run = 0
@@ -125,8 +174,8 @@ class ParallelRunner:
             for parent_conn in self.parent_conns:
                 parent_conn.send(("set_storage_capacity", storage_capacity))
 
-    def run(self, lbda_index=None, test_mode=False, 
-        visual_outputs_path=None, storage_capacity=None):
+    def run(self, lbda_index=None, test_mode=False,
+            visual_outputs_path=None, storage_capacity=None):
 
         self.reset(test_mode=test_mode, storage_capacity=storage_capacity)
 
@@ -144,20 +193,24 @@ class ParallelRunner:
         envs_not_terminated = [
             b_idx for b_idx, termed in enumerate(terminated) if not termed
         ]
-        final_env_infos = (
-            []
-        )  # may store extra stats like battle won. this is filled in ORDER OF TERMINATION
+        final_env_infos = []  # may store extra stats like battle won.
 
         save_probs = getattr(self.args, "save_probs", False)
 
         while True:
 
             if self.args.mac == "mappo_mac" or self.args.mac == "graph_mac":
-                mac_output = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, 
-                    bs=envs_not_terminated, test_mode=test_mode)
-            elif self.args.mac == "dqn_mac" or self.args.mac == "ldqn_mac":
-                mac_output = self.mac.select_actions(self.batch, t_ep=self.t, t_env=self.t_env, 
-                    lbda_indices=None, bs=envs_not_terminated, test_mode=test_mode)
+                print(">>> runner sees masks sums@t=0:",
+                      self.batch["avail_actions"][:, 0].sum(dim=-1).tolist())
+                mac_output = self.mac.select_actions(
+                    self.batch, t_ep=self.t, t_env=self.t_env,
+                    bs=envs_not_terminated, test_mode=test_mode
+                )
+            elif self.args.mac in ("dqn_mac", "ldqn_mac"):
+                mac_output = self.mac.select_actions(
+                    self.batch, t_ep=self.t, t_env=self.t_env,
+                    lbda_indices=None, bs=envs_not_terminated, test_mode=test_mode
+                )
 
             if save_probs:
                 actions, probs = mac_output
@@ -167,10 +220,7 @@ class ParallelRunner:
             cpu_actions = actions.to("cpu").numpy()
 
             # Update the actions taken
-            actions_chosen = {
-                "actions": actions.unsqueeze(1).to("cpu"),
-            }
-
+            actions_chosen = {"actions": actions.unsqueeze(1).to("cpu")}
             if save_probs:
                 actions_chosen["probs"] = probs.unsqueeze(1).to("cpu").detach()
 
@@ -181,29 +231,22 @@ class ParallelRunner:
             # Send actions to each env
             action_idx = 0
             for idx, parent_conn in enumerate(self.parent_conns):
-                if idx in envs_not_terminated:  # We produced actions for this env
-                    if not terminated[
-                        idx
-                    ]:  # Only send the actions to the env if it hasn't terminated
-                        parent_conn.send(("step", cpu_actions[action_idx]))
-                    action_idx += 1  # actions is not a list over every env
+                if idx in envs_not_terminated and not terminated[idx]:
+                    parent_conn.send(("step", cpu_actions[action_idx].tolist()))
+                    action_idx += 1
 
-            # Update envs_not_terminated
             envs_not_terminated = [
                 b_idx for b_idx, termed in enumerate(terminated) if not termed
             ]
-            all_terminated = all(terminated)
-            if all_terminated:
+            if all(terminated):
                 break
 
-            # Post step data we will insert for the current timestep
             post_transition_data = {
                 "reward": [],
                 "terminated": [],
                 "individual_rewards": [],
                 "cur_balance": []
             }
-            # Data for the next step we will insert in order to select an action
             pre_transition_data = {
                 "state": [],
                 "avail_actions": [],
@@ -211,13 +254,10 @@ class ParallelRunner:
                 "mean_action": [],
             }
 
-
-            # Receive data back for each unterminated env
             for idx, parent_conn in enumerate(self.parent_conns):
                 if not terminated[idx]:
                     data = parent_conn.recv()
 
-                    # Remaining data for this current timestep
                     post_transition_data["reward"].append((data["reward"],))
                     post_transition_data["individual_rewards"].append(
                         data["info"]["individual_rewards"]
@@ -227,14 +267,12 @@ class ParallelRunner:
                     )
 
                     episode_returns[idx] += data["reward"]
-
                     if self.args.n_agents > 1:
                         episode_individual_returns[idx] += data["info"]["individual_rewards"]
                     else:
                         episode_individual_returns[idx] += data["info"]["individual_rewards"][0]
 
                     episode_balance[idx] = data["info"]["cur_balance"]
-
                     episode_lengths[idx] += 1
                     if not test_mode:
                         self.env_steps_this_run += 1
@@ -242,14 +280,11 @@ class ParallelRunner:
                     env_terminated = False
                     if data["terminated"]:
                         final_env_infos.append(data["info"])
-                    if data["terminated"] and not data["info"].get(
-                        "episode_limit", False
-                    ):
+                    if data["terminated"] and not data["info"].get("episode_limit", False):
                         env_terminated = True
                     terminated[idx] = data["terminated"]
                     post_transition_data["terminated"].append((env_terminated,))
 
-                    # Data for the next timestep needed to select an action
                     pre_transition_data["state"].append(data["state"])
                     pre_transition_data["avail_actions"].append(data["avail_actions"])
                     pre_transition_data["obs"].append(data["obs"])
@@ -263,18 +298,15 @@ class ParallelRunner:
                         .numpy()
                     )
 
-            # Add post_transiton data into the batch
             self.batch.update(
                 post_transition_data,
                 bs=envs_not_terminated,
                 ts=self.t,
-                mark_filled=False,
+                mark_filled=False
             )
 
-            # Move onto the next timestep
             self.t += 1
 
-            # Add the pre-transition data
             self.batch.update(
                 pre_transition_data, bs=envs_not_terminated, ts=self.t, mark_filled=True
             )
@@ -308,7 +340,7 @@ class ParallelRunner:
         else:
             log_prefix = "train"
         if visual_outputs_path is not None:
-            self.parent_conns[0].send(("visualize_render",visual_outputs_path))
+            self.parent_conns[0].send(("visualize_render", visual_outputs_path))
             self.parent_conns[0].recv()
         infos = [cur_stats] + final_env_infos
 
@@ -331,7 +363,7 @@ class ParallelRunner:
         cur_profits.extend(episode_profits)
 
         n_test_runs = (
-            max(1, self.args.test_nepisode // self.batch_size) * self.batch_size
+                max(1, self.args.test_nepisode // self.batch_size) * self.batch_size
         )
 
         if test_mode:
@@ -374,9 +406,9 @@ class ParallelRunner:
             for i in range(self.args.n_agents):
                 wandb.log(
                     {
-                        f"SKUReturn/joint_{prefix}_sku{i+1}_mean": individual_returns[
-                            :, i
-                        ].mean()
+                        f"SKUReturn/joint_{prefix}_sku{i + 1}_mean": individual_returns[
+                                                                     :, i
+                                                                     ].mean()
                     },
                     step=self.t_env,
                 )
@@ -395,7 +427,7 @@ class ParallelRunner:
                     cur_balances.append(parent_conn.recv())
                 wandb.log(
                     {
-                        f"SKUReturn_{k}/joint_{prefix}_sku{i+1}_mean": np.mean(
+                        f"SKUReturn_{k}/joint_{prefix}_sku{i + 1}_mean": np.mean(
                             [np.array(rd[k])[:, i].sum() / 1e6 for rd in reward_dicts]
                         )
                         for k in reward_dicts[0].keys()
@@ -404,30 +436,30 @@ class ParallelRunner:
                 )
                 wandb.log(
                     {
-                        f"SKUBalance/joint_{prefix}_sku{i+1}_mean": np.mean(
+                        f"SKUBalance/joint_{prefix}_sku{i + 1}_mean": np.mean(
                             np.array(cur_balances)[:, i]
                         )
                     },
                     step=self.t_env,
                 )
             wandb.log(
-                    {
-                        f"SumBalance/joint_{prefix}_sum": np.mean(
-                            np.sum(np.array(cur_balances), 1)
-                        )
-                    },
-                    step=self.t_env,
-            )    
+                {
+                    f"SumBalance/joint_{prefix}_sum": np.mean(
+                        np.sum(np.array(cur_balances), 1)
+                    )
+                },
+                step=self.t_env,
+            )
 
         if self.args.use_wandb:
             wandb.log(
-                    {
-                        f"instock_sum/{prefix}_max_in_stock_sum_mean": stats['max_in_stock_sum_mean'],
-                        f"instock_sum/{prefix}_max_in_stock_sum_min": stats['max_in_stock_sum_min'],
-                        f"instock_sum/{prefix}_max_in_stock_sum_max": stats['max_in_stock_sum_max'],
-                    },
-                    step=self.t_env,
-            )    
+                {
+                    f"instock_sum/{prefix}_max_in_stock_sum_mean": stats['max_in_stock_sum_mean'],
+                    f"instock_sum/{prefix}_max_in_stock_sum_min": stats['max_in_stock_sum_min'],
+                    f"instock_sum/{prefix}_max_in_stock_sum_max": stats['max_in_stock_sum_max'],
+                },
+                step=self.t_env,
+            )
         self.logger.log_stat(
             prefix + "_max_in_stock_sum_mean", stats['max_in_stock_sum_mean'], self.t_env
         )
@@ -448,58 +480,70 @@ class ParallelRunner:
 
 
 def env_worker(remote, env_fn):
-    # Make environment
-    env = env_fn.x()
+    pid = os.getpid()
+    print(f"[env_worker {pid}] starting with wrapper stack", flush=True)
+    real_env = env_fn.x()
+    env = DebugEnv(real_env)
+    step_count = 0
+
     while True:
         cmd, data = remote.recv()
-        if cmd == "step":
-            actions = data
-            # Take a step in the environment
-            reward, terminated, env_info = env.step(actions)
-            # Return the observations, avail_actions and state to make the next action
-            state = env.get_state()
-            avail_actions = env.get_avail_actions()
-            obs = env.get_obs()
-            remote.send(
-                {
-                    # Data for the next timestep needed to pick an action
-                    "state": state,
-                    "avail_actions": avail_actions,
-                    "obs": obs,
-                    # Rest of the data for the current timestep
-                    "reward": reward,
-                    "terminated": terminated,
-                    "info": env_info,
-                }
-            )
-        elif cmd == "reset":
+        print(f"[env_worker {pid}] got cmd '{cmd}'", flush=True)
+
+        if cmd == "reset":
             env.reset()
-            remote.send(
-                {
-                    "state": env.get_state(),
-                    "avail_actions": env.get_avail_actions(),
-                    "obs": env.get_obs(),
-                }
-            )
+            masks = env.get_avail_actions()
+            zero_agents = [i for i, m in enumerate(masks) if sum(m) == 0]
+            if zero_agents:
+                print(f"   → [reset] zero idx (first 10): {zero_agents[:10]}", flush=True)
+                # Fallback: allow all actions for those agents
+                n_actions = len(masks[0])
+                for i in zero_agents:
+                    masks[i] = [1] * n_actions
+                print(f"   → [reset] fallback masks set to all ones for zero-avail agents", flush=True)
+            remote.send({
+                "state": env.get_state(),
+                "avail_actions": masks,
+                "obs": env.get_obs(),
+            })
+
+        elif cmd == "step":
+            actions = data
+            reward, terminated, info = env.step(actions)
+            masks = env.get_avail_actions()
+            zero_agents = [i for i, m in enumerate(masks) if sum(m) == 0]
+            if zero_agents:
+                print(f"   → [step t={step_count}] zero idx (first 10): {zero_agents[:10]}", flush=True)
+                n_actions = len(masks[0])
+                for i in zero_agents:
+                    masks[i] = [1] * n_actions
+                print(f"   → [step] fallback masks set to all ones for zero-avail agents", flush=True)
+            remote.send({
+                "state": env.get_state(),
+                "avail_actions": masks,
+                "obs": env.get_obs(),
+                "reward": reward,
+                "terminated": terminated,
+                "info": info,
+            })
+            step_count += 1
+
+        elif cmd == "get_env_info":
+            remote.send(env.get_env_info())
         elif cmd == "close":
             env.close()
             remote.close()
             break
-        elif cmd == "get_env_info":
-            remote.send(env.get_env_info())
+        elif cmd == "switch_mode":
+            env.switch_mode(data)
         elif cmd == "get_stats":
             remote.send(env.get_stats())
-        elif cmd == "switch_mode":
-            mode = data
-            env.switch_mode(mode)
         elif cmd == "get_profit":
             remote.send(env.get_profit())
         elif cmd == "get_reward_dict":
             remote.send(env._env.reward_monitor)
         elif cmd == "visualize_render":
             env.visualize_render(data)
-            # profit = env.get_profit()
-            # print("test_cur_avg_balances : {}".format(profit.sum()))
         elif cmd == "get_storage_capacity":
             remote.send(env._env.storage_capacity)
         elif cmd == "set_storage_capacity":
@@ -509,19 +553,39 @@ def env_worker(remote, env_fn):
 
 
 class CloudpickleWrapper:
-    """
-    Uses cloudpickle to serialize contents (otherwise multiprocessing tries to use pickle)
-    """
-
     def __init__(self, x):
         self.x = x
 
     def __getstate__(self):
         import cloudpickle
-
         return cloudpickle.dumps(self.x)
 
     def __setstate__(self, ob):
         import pickle
-
         self.x = pickle.loads(ob)
+
+
+class DebugEnv:
+    """
+    Wraps any env to intercept get_avail_actions calls and print full wrapper chain and mask stats.
+    """
+    def __init__(self, real_env):
+        self._env = real_env
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def get_avail_actions(self):
+        # Walk the wrapper chain, printing class names and mask summaries
+        chain = []
+        env = self
+        while hasattr(env, '_env'):
+            chain.append(type(env).__name__)
+            env = env._env
+        chain.append(type(env).__name__)
+        print(f"[WRAPPER CHAIN] {' -> '.join(chain)}", flush=True)
+
+        masks = self._env.get_avail_actions()
+        sums = [int(sum(m)) for m in masks]
+        print(f"[WRAPPER DEBUG:{type(self._env).__name__}] sums[:5]={sums[:5]} (min={min(sums)})", flush=True)
+        return masks

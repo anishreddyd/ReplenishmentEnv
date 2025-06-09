@@ -34,12 +34,14 @@ use_cuda: True                          # Whether to use GPU
 seed: 101                               # The random seed used in numpy, torch, etc.
 t_max: 5020000                          # Train t_max iterations in total
 
-action_selector: "multinomial"          # How to select actions during the training (and maybe evaluation depending on test_greedy)
+action_selector: "multinomial"
+mask_before_softmax: True
+         # How to select actions during the training (and maybe evaluation depending on test_greedy)
 epsilon_start: 1.0                      # Annealing from epsilon_start to epsilon_finish linearly in epsilon_anneal_time iterations
 epsilon_finish: 0.05
 epsilon_anneal_time: 50000
 save_probs: True                        # Whether to also return the action selection probablity from the action selector
-mask_before_softmax: True
+
 
 learner: "local_ppo_learner"            # Which learner REGISTER to use
 use_double_q: True                          # Whether to use double Q 

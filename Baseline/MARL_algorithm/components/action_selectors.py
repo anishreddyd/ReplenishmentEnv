@@ -75,6 +75,9 @@ class GumbelSoftmaxMultinomialActionSelector:
 REGISTRY["gumbel"] = GumbelSoftmaxMultinomialActionSelector
 
 
+from torch.distributions import Categorical
+import torch
+
 class MultinomialActionSelector:
     def __init__(self, args):
         self.args = args
@@ -91,31 +94,56 @@ class MultinomialActionSelector:
         self.save_probs = getattr(self.args, "save_probs", False)
 
     def select_action(self, agent_inputs, avail_actions, t_env, test_mode=False):
-        masked_policies = agent_inputs.clone()
-        masked_policies[avail_actions == 0] = 0
-        masked_policies = masked_policies / (
-            masked_policies.sum(-1, keepdim=True) + 1e-8
-        )
+        """
+        agent_inputs: Tensor of shape [B, A, n_actions] (or [batch*agents, n_actions])
+        avail_actions: same shape, with 0/1 masks
+        """
+        # existing debug for zero-avail rows
+        zero_avail = (avail_actions.sum(dim=-1) == 0)
+        num_zero = zero_avail.sum().item()
+        if num_zero > 0:
+            print(f"[DEBUG][t_env={t_env}] {num_zero} agents have ALL-ZERO avail_actions!")
+            bad_idx = zero_avail.nonzero(as_tuple=False)
+            print("  → bad_idx:", bad_idx.tolist())
+            print("  → their logits:", agent_inputs[zero_avail])
+
+        # mask out unavailable
+        policies = agent_inputs.clone()
+        policies[avail_actions == 0] = 0
+
+        # normalize to valid distribution
+        policies = policies / (policies.sum(dim=-1, keepdim=True) + 1e-8)
 
         if test_mode and self.test_greedy:
-            picked_actions = masked_policies.max(dim=2)[1]
+            picked_actions = policies.argmax(dim=-1)
         else:
+            # epsilon adjustment
             self.epsilon = self.schedule.eval(t_env)
+            counts = avail_actions.sum(dim=-1, keepdim=True) + 1e-8
+            uniform = avail_actions / counts
+            policies = (1 - self.epsilon) * policies + self.epsilon * uniform
+            policies[avail_actions == 0] = 0
 
-            epsilon_action_num = avail_actions.sum(-1, keepdim=True) + 1e-8
-            masked_policies = (
-                1 - self.epsilon
-            ) * masked_policies + avail_actions * self.epsilon / epsilon_action_num
-            masked_policies[avail_actions == 0] = 0
-            picked_actions = Categorical(masked_policies).sample().long()
+            # *** catch any rows where everything is zero ***
+            zero_rows = (policies.sum(dim=-1) == 0)
+            if zero_rows.any():
+                fallback = torch.ones_like(policies)
+                policies[zero_rows, :] = fallback[zero_rows, :]
+
+            # renormalize so each row sums to 1
+            policies = policies / policies.sum(dim=-1, keepdim=True)
+
+            # now safe to sample
+            picked_actions = Categorical(policies).sample().long()
 
         if self.save_probs:
-            return picked_actions, masked_policies
+            return picked_actions, policies
         else:
             return picked_actions
 
-
+# register selector
 REGISTRY["multinomial"] = MultinomialActionSelector
+
 
 
 def categorical_entropy(probs):

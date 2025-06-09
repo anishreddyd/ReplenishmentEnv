@@ -9,6 +9,7 @@ from ReplenishmentEnv.wrapper.history_wrapper import HistoryWrapper
 from ReplenishmentEnv.wrapper.observation_wrapper import ObservationWrapper
 from ReplenishmentEnv.wrapper.observation_wrapper_for_old_code import ObservationWrapper4OldCode
 from ReplenishmentEnv.wrapper.flatten_wrapper import FlattenWrapper
+from ReplenishmentEnv.wrapper.flatten_wrapper2 import FlattenWrapper2
 from ReplenishmentEnv.wrapper.oracle_wrapper import OracleWrapper
 
 

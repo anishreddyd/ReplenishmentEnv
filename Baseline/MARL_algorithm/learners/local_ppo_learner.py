@@ -27,7 +27,7 @@ class LocalPPOLearner:
         # dummy_args = copy.deepcopy(args)
         # dummy_args.n_actions = 1
         # self.critic = NMAC(scheme, None, dummy_args)
-        self.critic = critic_resigtry[args.critic_type](scheme, args)
+
         if args.critic_type == "graph_mix":
             self.critic = GraphMixer(
                         node_dim = args.node_feat_dim,
@@ -38,8 +38,13 @@ class LocalPPOLearner:
             self.critic = critic_resigtry[args.critic_type](scheme, args)
         self.params = list(self.mac.parameters()) + list(self.critic.parameters())
 
-        self.optimiser = Adam(params=self.params, lr=args.lr)
-        self.last_lr = args.lr
+        try:
+            self.args.lr = float(self.args.lr)
+        except:
+            raise ValueError(f"Could not convert lr={self.args.lr!r} to float")
+
+        self.optimiser = Adam(params=self.params, lr=self.args.lr)
+        self.last_lr = self.args.lr
 
         self.use_value_norm = getattr(self.args, "use_value_norm", False)
         if self.use_value_norm:
