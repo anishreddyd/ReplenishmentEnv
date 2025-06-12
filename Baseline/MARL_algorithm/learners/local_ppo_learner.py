@@ -1,54 +1,48 @@
-import torch
-from torch.optim import Adam
+# Baseline/MARL_algorithm/learners/local_ppo_learner.py
 
+import torch
+import wandb
 from components.action_selectors import categorical_entropy
 from components.episode_buffer import EpisodeBatch
-from modules.critics import REGISTRY as critic_resigtry
-from utils.rl_utils import build_gae_targets, build_gae_targets_with_T
-from utils.value_norm import ValueNorm
-import wandb
+from modules.critics import REGISTRY as critic_registry
+from modules.critics.GraphCriticWrapper import GraphCriticWrapper
 from modules.critics.graph_mixer import GraphMixer
+from torch.optim import Adam
+from utils.rl_utils import build_gae_targets
+from utils.value_norm import ValueNorm
 
 
 class LocalPPOLearner:
-    def __init__(self, mac, scheme, logger, args):
+    def __init__(self, mac, scheme, logger, args, graph_data=None):
         self.args = args
-        self.n_agents = args.n_agents
-        self.n_actions = args.n_actions
         self.mac = mac
         self.logger = logger
+        self.n_agents = args.n_agents
+        self.n_actions = args.n_actions
 
-        self.last_target_update_step = 0
-        self.critic_training_steps = 0
-
-        self.log_stats_t = -self.args.learner_log_interval - 1
-
-        # a trick to reuse mac
-        # dummy_args = copy.deepcopy(args)
-        # dummy_args.n_actions = 1
-        # self.critic = NMAC(scheme, None, dummy_args)
-
+        # Build critic
         if args.critic_type == "graph_mix":
-            self.critic = GraphMixer(
-                        node_dim = args.node_feat_dim,
-                        edge_dim = args.edge_attr_dim,
-                        hidden_dim = args.gnn_hidden_dim
+            # 1) raw mixer
+            gm = GraphMixer(
+                node_dim=args.node_feat_dim,
+                edge_dim=args.edge_attr_dim,
+                hidden_dim=args.gnn_hidden_dim
             )
+            if graph_data is None:
+                raise ValueError("graph_data is required for graph_mix critic")
+            self.critic = GraphCriticWrapper(gm, graph_data)
         else:
-            self.critic = critic_resigtry[args.critic_type](scheme, args)
+            # fallback to your other critics
+            self.critic = critic_registry[args.critic_type](scheme, args)
+
+        # combine actor + critic params
         self.params = list(self.mac.parameters()) + list(self.critic.parameters())
+        self.optimiser = Adam(self.params, lr=float(args.lr))
 
-        try:
-            self.args.lr = float(self.args.lr)
-        except:
-            raise ValueError(f"Could not convert lr={self.args.lr!r} to float")
-
-        self.optimiser = Adam(params=self.params, lr=self.args.lr)
-        self.last_lr = self.args.lr
-
-        self.use_value_norm = getattr(self.args, "use_value_norm", False)
+        # optional value‐norm
+        self.use_value_norm = getattr(args, "use_value_norm", False)
         if self.use_value_norm:
-            self.value_norm = ValueNorm(1, device=self.args.device)
+            self.value_norm = ValueNorm(1, device=args.device)
 
     def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
         # Get the relevant quantities
@@ -74,6 +68,15 @@ class LocalPPOLearner:
         old_logprob = torch.log(torch.gather(old_probs, dim=3, index=actions)).detach()
         mask_agent = mask.unsqueeze(2).repeat(1, 1, self.n_agents, 1)
 
+        # for graph‐based critic we only have 1 “agent” per env,
+        # so collapse out the real agent dimension for all critic ops:
+        mask_critic = mask_agent
+        rewards_critic = rewards
+
+        if self.args.critic_type == "graph_mix":
+         # pick the first (or mean) over the 1500 agents
+            mask_critic = mask_agent[:, :, :1, :]  # → [B, T, 1, 1]
+            rewards_critic = rewards[:, :, :1, :]  # → [B, T, 1, 1]
         # targets and advantages
         with torch.no_grad():
             if "rnn" in self.args.critic_type:
@@ -83,31 +86,32 @@ class LocalPPOLearner:
                     agent_outs = self.critic.forward(batch, t=t)
                     old_values.append(agent_outs)
                 old_values = torch.stack(old_values, dim=1)
-            else:
+                old_values = old_values.unsqueeze(-1)
+            elif self.args.critic_type == "graph_mix":
+                old_values = self.critic(batch)
+                old_values = old_values.unsqueeze(-1)
+            else :
                 old_values = self.critic(batch)
 
+
+
             if self.use_value_norm:
-                value_shape = old_values.shape
-                values = self.value_norm.denormalize(old_values.view(-1)).view(
-                    value_shape
-                )
-            else:
-                values = old_values
-            
-            advantages, targets = build_gae_targets(
-                rewards * 100, #.unsqueeze(2).repeat(1, 1, self.n_agents, 1),
-                mask_agent,
-                values,
-                self.args.gamma,
-                self.args.gae_lambda,
-            )
+                vshape = old_values.shape
+                old_values = self.value_norm.denormalize(old_values.view(-1)).view(vshape)
 
-        normed_advantages = (advantages - advantages.mean()) / \
-            (advantages.std() + 1e-6)
+        # 2) build advantages/targets with build_gae_targets
+        advantages, targets = build_gae_targets(
+            rewards_critic * 100,  # your scaling
+            mask_critic,
+            old_values,
+            self.args.gamma,
+            self.args.gae_lambda
+        )
+        norm_adv = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
 
-        # PPO Loss
+        # 3) PPO mini‐epochs (critic + actor + entropy) exactly as before
         for _ in range(self.args.mini_epochs):
-            # Critic
+            # critic
             if "rnn" in self.args.critic_type:
                 values = []
                 self.critic.init_hidden(batch.batch_size)
@@ -115,23 +119,15 @@ class LocalPPOLearner:
                     agent_outs = self.critic.forward(batch, t=t)
                     values.append(agent_outs)
                 values = torch.stack(values, dim=1)
+                values = values.unsqueeze(-1)
+            elif "graph_mix" in self.args.critic_type:
+                values = self.critic(batch)[:, :-1]  # [B, T−1]
+                values = values.unsqueeze(-1)
             else:
                 values = self.critic(batch)[:, :-1]
 
-            # # value clip
-            # values_clipped = old_values[:, :-1] + (values - old_values[:, :-1]).clamp(
-            #     -self.args.eps_clip, self.args.eps_clip
-            # )
-
-            # # 0-out the targets that came from padded data
-            # td_error = torch.max(
-            #     (values - targets.detach()) ** 2,
-            #     (values_clipped - targets.detach()) ** 2,
-            # )
-            
-            td_error = (values - targets.detach()) ** 2
-            masked_td_error = td_error * mask_agent
-            critic_loss = 0.5 * masked_td_error.sum() / mask_agent.sum()
+            td_err = (values - targets.detach()) ** 2
+            critic_loss = 0.5 * (td_err * mask_critic).sum() / mask_critic.sum()
 
             # Actor
             pi = []
@@ -145,14 +141,14 @@ class LocalPPOLearner:
             pi_taken = torch.gather(pi, dim=3, index=actions)
             log_pi_taken = torch.log(pi_taken)
 
-            ratios = torch.exp(log_pi_taken - old_logprob) 
-            surr1 = ratios * normed_advantages
+            ratios = torch.exp(log_pi_taken - old_logprob)
+            surr1 = ratios * norm_adv
             surr2 = (
-                torch.clamp(ratios, 1 - self.args.eps_clip, 1 + self.args.eps_clip)
-                * normed_advantages
+                    torch.clamp(ratios, 1 - self.args.eps_clip, 1 + self.args.eps_clip)
+                    * norm_adv
             )
             actor_loss = (
-                -(torch.min(surr1, surr2) * mask_agent).sum() / mask_agent.sum()
+                    -(torch.min(surr1, surr2) * mask_agent).sum() / mask_agent.sum()
             )
 
             # entropy
@@ -162,45 +158,38 @@ class LocalPPOLearner:
             entropy_loss[mask == 0] = 0  # fill nan
             entropy_loss = (entropy_loss * mask).sum() / mask.sum()
 
-            
             loss = (
-                actor_loss
-                + self.args.critic_coef * critic_loss
-                - self.args.entropy_coef * entropy_loss
+                    actor_loss
+                    + self.args.critic_coef * critic_loss
+                    - self.args.entropy_coef * entropy_loss
             )
 
-            # Optimise agents
             self.optimiser.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.params, self.args.grad_norm_clip
-            )
+            torch.nn.utils.clip_grad_norm_(self.params, self.args.grad_norm_clip)
             self.optimiser.step()
 
-            if _ == self.args.mini_epochs - 1:
-
-                wandb.log({'loss': loss.item(),
-                           'actor_loss': actor_loss.item(),
-                           'critic_loss': critic_loss.item(),
-                           'values': values.mean().item(),
-                           'targets': targets.mean().item(),
-                           'reward': rewards.mean(),
-                           })
+            if _ == self.args.mini_epochs - 1 and self.args.use_wandb:
+                wandb.log({
+                    'loss': loss.item(),
+                    'actor_loss': actor_loss.item(),
+                    'critic_loss': critic_loss.item(),
+                    'values': values.mean().item(),
+                    'targets': targets.mean().item(),
+                    'reward': rewards.mean(),
+                }, step=t_env)
 
     def cuda(self):
         self.mac.cuda()
         self.critic.cuda()
 
-    def save_models(self, path, postfix = ""):
+    def save_models(self, path, postfix=""):
         self.mac.save_models(path, postfix)
-        torch.save(self.optimiser.state_dict(), "{}/agent_opt".format(path)+postfix+".th")
+        torch.save(self.optimiser.state_dict(), f"{path}/agent_opt{postfix}.th")
 
-    def load_models(self, path, postfix = ""):
+    def load_models(self, path, postfix=""):
         self.mac.load_models(path, postfix)
-        # Not quite right but I don't want to save target networks
         self.optimiser.load_state_dict(
-            torch.load(
-                "{}/agent_opt".format(path)+postfix+".th",
-                map_location=lambda storage, loc: storage,
-            )
+            torch.load(f"{path}/agent_opt{postfix}.th",
+                       map_location=lambda s, l: s)
         )

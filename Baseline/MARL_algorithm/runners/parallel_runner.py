@@ -121,14 +121,14 @@ class ParallelRunner:
             "mean_action": [],
         }
         # Get the obs, state and avail_actions back
+
         for parent_conn in self.parent_conns:
             data = parent_conn.recv()
             pre_transition_data["state"].append(data["state"])
             pre_transition_data["avail_actions"].append(data["avail_actions"])
             pre_transition_data["obs"].append(data["obs"])
-            pre_transition_data["mean_action"].append(
-                np.zeros([1, self.args.n_agents, self.args.n_actions])
-            )
+            pre_transition_data["mean_action"].append(np.zeros([1, self.args.n_agents, self.args.n_actions]))
+
 
         print(
             ">>> pre-transition_data['avail_actions'] shapes & sums:",
@@ -142,25 +142,14 @@ class ParallelRunner:
             ]
         )
 
-        self.batch.update(
-            pre_transition_data,
-            bs = list(range(self.batch_size)),  # explicitly include every env index
-            ts = 0,
-            mark_filled = True  # ensure timestep 0 is marked as present
-        )
-        self.batch.update(pre_transition_data, ts=0)
 
-        batch_masks = self.batch["avail_actions"][:, 0, :, :]  # shape [batch, n_agents, n_actions]
-        sums = [bm.sum().item() for bm in batch_masks]
-        print(">>> BATCH avail_actions sums @ t=0:", sums)
+         # Write into the batch for ts=0 and mark these as filled
+        self.batch.update(pre_transition_data, ts=0, mark_filled=True)
 
-        with torch.no_grad():
-            # batch["avail_actions"] is a tensor of shape (bs, T, n_agents, n_actions)
-            ba = self.batch["avail_actions"][:, 0, 0, :]  # for agent-0
-            print(
-                ">>> after update, batch avail_actions sums:",
-                ba.sum(dim=1).cpu().tolist()
-            )
+        batch_masks = self.batch["avail_actions"]  # shape [batch_size, T+1, n_agents, n_actions]
+        sums_at_t0 = batch_masks[:, 0]  # [batch_size, n_agents, n_actions]
+        sums_at_t0 = sums_at_t0.reshape(self.batch_size, -1).sum(dim=1).tolist()
+        print(">>> BATCH after update, sums at t=0:", sums_at_t0)
 
         self.t = 0
         self.env_steps_this_run = 0
@@ -200,8 +189,6 @@ class ParallelRunner:
         while True:
 
             if self.args.mac == "mappo_mac" or self.args.mac == "graph_mac":
-                print(">>> runner sees masks sums@t=0:",
-                      self.batch["avail_actions"][:, 0].sum(dim=-1).tolist())
                 mac_output = self.mac.select_actions(
                     self.batch, t_ep=self.t, t_env=self.t_env,
                     bs=envs_not_terminated, test_mode=test_mode
@@ -232,7 +219,7 @@ class ParallelRunner:
             action_idx = 0
             for idx, parent_conn in enumerate(self.parent_conns):
                 if idx in envs_not_terminated and not terminated[idx]:
-                    parent_conn.send(("step", cpu_actions[action_idx].tolist()))
+                    parent_conn.send(("step", cpu_actions[action_idx]))
                     action_idx += 1
 
             envs_not_terminated = [
@@ -482,8 +469,8 @@ class ParallelRunner:
 def env_worker(remote, env_fn):
     pid = os.getpid()
     print(f"[env_worker {pid}] starting with wrapper stack", flush=True)
-    real_env = env_fn.x()
-    env = DebugEnv(real_env)
+    # real_env = env_fn.x()
+    env = env_fn.x()
     step_count = 0
 
     while True:

@@ -19,6 +19,8 @@ class TimeLimit(GymTimeLimit):
 
     def step(self, action):
         assert self._elapsed_steps is not None, "Must call reset() first"
+        print("GraphWrapper.step: self.env is", self.env)
+        print("  → type(self.env.step) is", type(self.env.step))
         obs, rew, done, info = self.env.step(action)
         self._elapsed_steps += 1
         if self._elapsed_steps >= self._max_episode_steps:
@@ -58,8 +60,7 @@ class ReplenishmentEnv(MultiAgentEnv):
                 "ObservationWrapper4OldCode",
                 "FlattenWrapper2",
                 "OracleWrapper",
-                "GraphWrapper",  # ← stays in the chain
-                "CurriculumWrapper"
+                "GraphWrapper"
             ],
             mode=mode,
             vis_path=vis_path,

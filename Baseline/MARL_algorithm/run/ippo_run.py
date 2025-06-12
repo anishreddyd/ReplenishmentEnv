@@ -1,25 +1,21 @@
+import copy
 import datetime
-import glob
 import os
-import re
 import threading
 import time
-import copy
 from os.path import abspath, dirname
 from types import SimpleNamespace as SN
-import pandas as pd
-import numpy as np
-import torch
-import pdb
 
+import numpy as np
+import pandas as pd
+import torch
 import wandb
 from components.episode_buffer import ReplayBuffer
-from components.transforms import OneHot
 from components.reward_scaler import RewardScaler
+from components.transforms import OneHot
 from controllers import REGISTRY as mac_REGISTRY
 from learners import REGISTRY as le_REGISTRY
 from runners import REGISTRY as r_REGISTRY
-
 from utils.logging import Logger
 from utils.timehelper import time_left, time_str
 
@@ -86,6 +82,11 @@ def run_sequential(args, logger):
     # Init runner so we can get env info
     runner = r_REGISTRY[args.runner](args=args, logger=logger)
 
+    if args.mac == "graph_mac":
+        # Your GraphWrapper must expose a .get_graph() returning a torch_geometric.data.Data
+        graph_data = runner.env.get_graph()
+    else:
+        graph_data = None
     # Set up schemes and groups here
     env_info = runner.get_env_info()
     args.n_agents = env_info["n_agents"]
@@ -159,7 +160,7 @@ def run_sequential(args, logger):
         visual_runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac)
 
     # Learner
-    learner = le_REGISTRY[args.learner](mac, buffer.scheme, logger, args)
+    learner = le_REGISTRY[args.learner](mac, buffer.scheme, logger, args, graph_data=graph_data)
 
     # Reward scaler
     reward_scaler = RewardScaler()

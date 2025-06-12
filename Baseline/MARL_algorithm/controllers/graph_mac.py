@@ -26,26 +26,38 @@ class GraphMAC(nn.Module):
         # self.model.init_hidden(batch_size * n_agents)
         pass
 
-    # def select_actions(self, batch, t_ep, t_env, bs, test_mode=False):
-    #     obs = batch["obs"][t_ep]            # [B, A, feat]
-    #     B, A, F = obs.shape
-    #     x       = obs.view(B*A, F)          # [N, feat]
-    #
-    #     graph   = self.env.get_graph()
-    #     ei, ea, bch = graph["edge_index"], graph["edge_attr"], graph["batch"]
-    #
-    #     logits, _ = self.model(x, ei, ea, bch)    # [N, n_actions]
-    #
-    #     avail = batch["avail_actions"][t_ep].view(B*A, self.n_actions).to(logits.device)
-    #     logits[avail==0] = -1e10
-    #
-    #     probs = torch.softmax(logits, dim=-1)     # [N, n_actions]
-    #
-    #     chosen_flat = self.action_selector.select_action(
-    #         probs, avail, t_env, test_mode
-    #     )  # [N]
-    #
-    #     return chosen_flat.view(B, A)
+    def forward(self, batch, t, t_env, test_mode=False):
+        """
+        Called during training to get π(a|s) for all agents.
+        Must return a float‐tensor of shape [B, A, n_actions].
+        """
+        # 1) grab per‐timestep obs & avail
+        #    batch["obs"] is [B, T, A, feat]
+        obs_t = batch["obs"][:, t]  # [B, A, feat]
+        avail_t = batch["avail_actions"][:, t]  # [B, A, n_actions]
+
+        B, A, F = obs_t.shape
+        x = obs_t.reshape(B * A, F)  # flatten to [N, feat], N = B*A
+
+        # 2) get graph once
+        graph = self.env.get_graph()
+        edge_index = graph["edge_index"].to(x.device)  # [2, E]
+        edge_attr = graph["edge_attr"].to(x.device)  # [E, edge_dim]
+        # single‐graph -> batch_idx all zeros
+        batch_idx = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+
+        # 3) run through your GNN actor
+        logits, _ = self.model(x, edge_index, edge_attr, batch_idx)  # [N, n_actions]
+        logits = logits.view(B, A, -1)  # [B, A, n_actions]
+
+        # 4) mask unavailable
+        mask = avail_t.to(logits.device)
+        logits = logits.masked_fill(mask == 0, -1e10)
+
+        # 5) produce π‐distribution
+        pi = torch.softmax(logits, dim=-1)  # [B, A, n_actions]
+        return pi
+
 
     def select_actions(self, batch, t_ep, t_env, bs, test_mode=False):
         """
@@ -58,17 +70,12 @@ class GraphMAC(nn.Module):
         bs: a list of the indices of the parallel envs that are still running
         """
         # 1) grab the full batched obs & avail masks, then select only those in bs
-        full_obs = batch["obs"][t_ep]  # [n_lambda, n_agents, feat]
-        full_avail = batch["avail_actions"][t_ep]  # [n_lambda, n_agents, actions]
+        # full_obs = batch["obs"][t_ep]  # [n_lambda, n_agents, feat]
+        # full_avail = batch["avail_actions"][t_ep]  # [n_lambda, n_agents, actions]
+        full_obs = batch["obs"][:, t_ep]  # [batch_size_run, n_agents, feat]
+        full_avail = batch["avail_actions"][:, t_ep]  # [batch_size_run, n_agents, n_actions]
         obs_baft = full_obs[bs]  # [batch_size_run, n_agents, feat]
         avail_baft = full_avail[bs]  # [batch_size_run, n_agents, actions]
-
-        print(">>> runner sees masks sums@t=0:",
-              batch["avail_actions"][:, 0].sum(dim=-1).tolist())
-
-        # DEBUG #1: overall shapes
-        print(f"[GraphMAC] t_ep={t_ep} | obs_baft.shape={tuple(obs_baft.shape)}, "
-              f"avail_baft.shape={tuple(avail_baft.shape)}", flush=True)
 
         # 2) single‐graph metadata (identical for each env)
         g = self.env.get_graph()

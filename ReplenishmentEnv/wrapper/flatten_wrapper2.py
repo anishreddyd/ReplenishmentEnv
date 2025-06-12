@@ -22,7 +22,7 @@ class FlattenWrapper2(gym.Wrapper):
 
     def step(self, actions: np.ndarray) -> Any:
         # reshape actions back into env’s expected shape
-        actions = actions.reshape(self.warehouse_count, self.sku_count)
+        actions = np.array(actions).reshape(self.warehouse_count, self.sku_count)
         ret = self.env.step(actions)
         obs, *rest = ret
         flat_obs = obs.reshape(self.agent_count, -1)
