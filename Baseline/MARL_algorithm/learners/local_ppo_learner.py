@@ -113,6 +113,7 @@ class LocalPPOLearner:
                 self.args.gamma,
                 self.args.gae_lambda
             )
+        print(f"[DEBUG] old_values shape: {tuple(old_values.shape)}", flush=True)
         norm_adv = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
         norm_adv = torch.clamp(norm_adv, -self.args.max_adv, self.args.max_adv)
 
@@ -137,6 +138,14 @@ class LocalPPOLearner:
             critic_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.args.critic_clip)
             self.critic_optimizer.step()
+
+            # ----- debug gradients and parameters for the actor -----
+            for n, p in self.mac.named_parameters():
+                if p.grad is not None:
+                    if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                        print(f"[DEBUG] NaN/Inf grad in actor param {n}", flush=True)
+                if torch.isnan(p).any() or torch.isinf(p).any():
+                    print(f"[DEBUG] NaN/Inf value in actor param {n} BEFORE update", flush=True)
 
             # Actor + entropy update
             pi = []
@@ -171,10 +180,24 @@ class LocalPPOLearner:
                   f"ent_loss={entropy_loss.item():.3e} adv_mean={norm_adv.mean():.3e} "
                   f"adv_std={norm_adv.std():.3e}")
 
-            self.actor_optimizer.zero_grad()
-            total_actor_loss.backward()
+           self.actor_optimizer.zero_grad()
+           total_actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.mac.parameters(), self.args.actor_clip)
+            for n, p in self.mac.named_parameters():
+                if p.grad is not None:
+                    print(f"[DEBUG] grad {n} norm {p.grad.norm().item():.4f}", flush=True)
             self.actor_optimizer.step()
+
+            # Debug parameter stats
+            for n, p in self.mac.named_parameters():
+                if p.requires_grad:
+                    print(f"[DEBUG] param {n} norm {p.norm().item():.4f} "
+                          f"min {p.min().item():.4f} max {p.max().item():.4f}", flush=True)
+
+            # ----- check actor parameters for NaN/Inf after update -----
+            for n, p in self.mac.named_parameters():
+                if torch.isnan(p).any() or torch.isinf(p).any():
+                    print(f"[DEBUG] NaN/Inf value in actor param {n} AFTER update", flush=True)
 
             # Optional wandb logging
             if epoch == self.args.mini_epochs - 1 and self.args.use_wandb:

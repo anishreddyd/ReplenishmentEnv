@@ -54,6 +54,8 @@ class GraphMAC(nn.Module):
         if torch.isnan(pi).any():
             idx = torch.isnan(pi).nonzero(as_tuple=False)[:5]
             print(f"[GraphMAC‐TRAIN][ERROR] pi NaN at {idx.tolist()}", flush=True)
+        else:
+            print(f"[GraphMAC-TRAIN] pi stats: min={pi.min().item():.3f}, max={pi.max().item():.3f}", flush=True)
 
         return pi
 
