@@ -31,11 +31,15 @@ class GraphMAC(nn.Module):
         avail_t = batch["avail_actions"][:, t]  # [B, A, n_actions]
         B, A, F = obs_t.shape
         x = obs_t.reshape(B * A, F)
-        ei, ea = self.env.get_graph()["edge_index"], self.env.get_graph()["edge_attr"]
+        g = self.env.get_graph()
+        ei = g["edge_index"].to(x.device)
+        ea = g["edge_attr"].to(x.device)
         batch_idx = torch.zeros(x.size(0), device=x.device, dtype=torch.long)
 
         logits, _ = self.model(x, ei, ea, batch_idx)
         logits = logits.view(B, A, -1)
+        # Replace any NaN or Inf values resulting from extreme gradients
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
 
         # —— DEBUG HERE ——
         print(f"[GraphMAC‐TRAIN] t={t} logits.min={logits.min().item():.3f}, "
@@ -43,6 +47,13 @@ class GraphMAC(nn.Module):
 
         mask = avail_t.to(logits.device)
         logits = logits.masked_fill(mask == 0, -1e10)
+
+        # If an agent has no legal actions (all zeros) at this timestep, avoid
+        # NaNs in softmax by zeroing its logits before softmax. Those agents are
+        # masked out later in the loss anyway.
+        no_legal = (mask.sum(dim=-1, keepdim=True) == 0)
+        if no_legal.any():
+            logits = logits.masked_fill(no_legal, 0.0)
 
         if torch.isnan(logits).any():
             idx = torch.isnan(logits).nonzero(as_tuple=False)[:5]
@@ -52,6 +63,8 @@ class GraphMAC(nn.Module):
         if torch.isnan(pi).any():
             idx = torch.isnan(pi).nonzero(as_tuple=False)[:5]
             print(f"[GraphMAC‐TRAIN][ERROR] pi NaN at {idx.tolist()}", flush=True)
+        else:
+            print(f"[GraphMAC-TRAIN] pi stats: min={pi.min().item():.3f}, max={pi.max().item():.3f}", flush=True)
 
         return pi
 
@@ -78,9 +91,9 @@ class GraphMAC(nn.Module):
         avail_baft = full_avail[bs]  # [len(bs), A, n_actions]
 
         # 3) static graph metadata
-        g         = self.env.get_graph()
-        edge_idx  = g["edge_index"]
-        edge_attr = g["edge_attr"]
+        g = self.env.get_graph()
+        edge_idx = g["edge_index"].to(full_obs.device)
+        edge_attr = g["edge_attr"].to(full_obs.device)
 
         all_chosen = []
         for batch_idx, env_i in enumerate(bs):
@@ -89,6 +102,7 @@ class GraphMAC(nn.Module):
 
             logits_i, _ = self.model(x_i, edge_idx, edge_attr, batch_i)  # [A, n_actions]
             logits_i    = logits_i.view(A, self.n_actions)
+            logits_i    = torch.nan_to_num(logits_i, nan=0.0, posinf=1e6, neginf=-1e6)
 
             avail_i = avail_baft[batch_idx].to(logits_i.device)         # [A, n_actions]
 
