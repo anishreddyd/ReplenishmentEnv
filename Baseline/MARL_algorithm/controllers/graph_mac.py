@@ -27,103 +27,106 @@ class GraphMAC(nn.Module):
         pass
 
     def forward(self, batch, t, t_env, test_mode=False):
-        """
-        Called during training to get π(a|s) for all agents.
-        Must return a float‐tensor of shape [B, A, n_actions].
-        """
-        # 1) grab per‐timestep obs & avail
-        #    batch["obs"] is [B, T, A, feat]
         obs_t = batch["obs"][:, t]  # [B, A, feat]
         avail_t = batch["avail_actions"][:, t]  # [B, A, n_actions]
-
         B, A, F = obs_t.shape
-        x = obs_t.reshape(B * A, F)  # flatten to [N, feat], N = B*A
+        x = obs_t.reshape(B * A, F)
+        ei, ea = self.env.get_graph()["edge_index"], self.env.get_graph()["edge_attr"]
+        batch_idx = torch.zeros(x.size(0), device=x.device, dtype=torch.long)
 
-        # 2) get graph once
-        graph = self.env.get_graph()
-        edge_index = graph["edge_index"].to(x.device)  # [2, E]
-        edge_attr = graph["edge_attr"].to(x.device)  # [E, edge_dim]
-        # single‐graph -> batch_idx all zeros
-        batch_idx = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        logits, _ = self.model(x, ei, ea, batch_idx)
+        logits = logits.view(B, A, -1)
 
-        # 3) run through your GNN actor
-        logits, _ = self.model(x, edge_index, edge_attr, batch_idx)  # [N, n_actions]
-        logits = logits.view(B, A, -1)  # [B, A, n_actions]
+        # —— DEBUG HERE ——
+        print(f"[GraphMAC‐TRAIN] t={t} logits.min={logits.min().item():.3f}, "
+              f"max={logits.max().item():.3f}, mean={logits.mean().item():.3f}", flush=True)
 
-        # 4) mask unavailable
         mask = avail_t.to(logits.device)
         logits = logits.masked_fill(mask == 0, -1e10)
 
-        # 5) produce π‐distribution
-        pi = torch.softmax(logits, dim=-1)  # [B, A, n_actions]
-        return pi
+        if torch.isnan(logits).any():
+            idx = torch.isnan(logits).nonzero(as_tuple=False)[:5]
+            print(f"[GraphMAC‐TRAIN][ERROR] logits NaN at {idx.tolist()}", flush=True)
 
+        pi = torch.softmax(logits, dim=-1)
+        if torch.isnan(pi).any():
+            idx = torch.isnan(pi).nonzero(as_tuple=False)[:5]
+            print(f"[GraphMAC‐TRAIN][ERROR] pi NaN at {idx.tolist()}", flush=True)
+
+        return pi
 
     def select_actions(self, batch, t_ep, t_env, bs, test_mode=False):
         """
-        For each parallel env index in bs we:
-          1) pull out its [A, feat] obs,
-          2) run one small GNN (same graph structure) to get [A, actions],
-          3) mask + softmax + sample → [A],
-        then stack back to [batch_size_run, A].
-
-        bs: a list of the indices of the parallel envs that are still running
+        batch["obs"]:         [B, T, A, F]
+        batch["avail_actions"]:[B, T, A, n_actions]
+        bs: indices of envs still running
         """
-        # 1) grab the full batched obs & avail masks, then select only those in bs
-        # full_obs = batch["obs"][t_ep]  # [n_lambda, n_agents, feat]
-        # full_avail = batch["avail_actions"][t_ep]  # [n_lambda, n_agents, actions]
-        full_obs = batch["obs"][:, t_ep]  # [batch_size_run, n_agents, feat]
-        full_avail = batch["avail_actions"][:, t_ep]  # [batch_size_run, n_agents, n_actions]
-        obs_baft = full_obs[bs]  # [batch_size_run, n_agents, feat]
-        avail_baft = full_avail[bs]  # [batch_size_run, n_agents, actions]
+        B, A, F = batch["obs"].shape[0], batch["obs"].shape[2], batch["obs"].shape[3]
+        full_obs   = batch["obs"][:, t_ep]        # [B, A, F]
+        full_avail = batch["avail_actions"][:, t_ep]  # [B, A, n_actions]
 
-        # 2) single‐graph metadata (identical for each env)
-        g = self.env.get_graph()
-        edge_idx = g["edge_index"]
+        # 1) UP-FRONT: any entire env with zero avail for ALL its agents?
+        zero_envs = (full_avail.sum(dim=-1)==0).all(dim=-1).nonzero(as_tuple=False).flatten()
+        if zero_envs.numel() > 0:
+            print(f"[GraphMAC][FATAL] t={t_ep}, envs with zero-avail for all agents: {zero_envs.tolist()}", flush=True)
+            for e in zero_envs.tolist():
+                print(f"    avail_actions[{e},:,:] =\n{full_avail[e].cpu().numpy()}", flush=True)
+            raise RuntimeError("Encountered env(s) with zero legal actions for every agent.")
+
+        # 2) slice down to only the still-running envs
+        obs_baft   = full_obs[bs]    # [len(bs), A, F]
+        avail_baft = full_avail[bs]  # [len(bs), A, n_actions]
+
+        # 3) static graph metadata
+        g         = self.env.get_graph()
+        edge_idx  = g["edge_index"]
         edge_attr = g["edge_attr"]
 
         all_chosen = []
-        batch_size_run, A, _ = obs_baft.shape
-
         for batch_idx, env_i in enumerate(bs):
-            # pull out one env’s nodes by batch index
-            x_i = obs_baft[batch_idx].view(-1, obs_baft.size(-1))  # [A, F]
-            batch_i = torch.zeros(x_i.size(0), dtype=torch.long, device=x_i.device)
+            x_i      = obs_baft   [batch_idx].reshape(-1, F)       # [A, F]
+            batch_i  = torch.zeros(x_i.size(0), dtype=torch.long, device=x_i.device)
 
-            # forward through GNN
             logits_i, _ = self.model(x_i, edge_idx, edge_attr, batch_i)  # [A, n_actions]
+            logits_i    = logits_i.view(A, self.n_actions)
 
-            # grab this env’s avail mask by batch index
-            avail_i = avail_baft[batch_idx].to(logits_i.device)  # [A, n_actions]
+            avail_i = avail_baft[batch_idx].to(logits_i.device)         # [A, n_actions]
 
-            # DEBUG #2: per‐env mask sums
-            sums_i = avail_i.sum(dim=-1)
-            print(f"[GraphMAC] env={env_i} (batch_idx={batch_idx}) avail_i.shape={tuple(avail_i.shape)}, "
-                  f"sums_i[:5]={sums_i[:5].tolist()}", flush=True)
+            # DEBUG: mask coverage & raw logits stats
+            pct_masked = 100 * (avail_i==0).float().mean().item()
+            print(f"[GraphMAC][DEBUG] env={env_i} mask coverage: {pct_masked:.1f}% zeroed", flush=True)
+            print(f"[GraphMAC][DEBUG] env={env_i} logits before mask: min={logits_i.min().item():.3f}, max={logits_i.max().item():.3f}, mean={logits_i.mean().item():.3f}", flush=True)
 
-            # apply mask with masked_fill
-            logits_i = logits_i.masked_fill(avail_i == 0, -1e10)
+            # 4) AGENT-LEVEL assert: each agent must have at least one legal move
+            per_agent_sum = avail_i.sum(dim=-1)        # [A]
+            zero_agents   = (per_agent_sum==0).nonzero(as_tuple=False).flatten()
+            if zero_agents.numel() > 0:
+                print(f"[GraphMAC][FATAL] env={env_i} these agent indices have NO legal actions: {zero_agents.tolist()}", flush=True)
+                for a in zero_agents.tolist():
+                    print(f"    agent={a} avail[{env_i},{a},:] = {avail_i[a].cpu().numpy()}", flush=True)
+                raise RuntimeError(f"Found agent(s) with zero legal actions in env {env_i} at t={t_ep}")
 
-            # DEBUG #3: check for NaNs in masked logits
-            if torch.isnan(logits_i).any():
-                nan_idx = torch.isnan(logits_i).nonzero(as_tuple=False)
-                print(f"[GraphMAC] env={env_i} logits_i has NaNs at indices {nan_idx[:5]}", flush=True)
+            # 5) mask out illegal logits
+            logits_i = logits_i.masked_fill(avail_i==0, -1e10)
 
-            # softmax → probabilities
+            # DEBUG: masked logits stats
+            print(f"[GraphMAC][DEBUG] env={env_i} logits after mask: min={logits_i.min().item():.3f}, max={logits_i.max().item():.3f}, mean={logits_i.mean().item():.3f}", flush=True)
+
+            # 6) softmax → probabilities
             probs_i = torch.softmax(logits_i, dim=-1)
+            prob_sums = probs_i.sum(dim=-1)  # should all be ~1
+            print(f"[GraphMAC][DEBUG] env={env_i} probs sum first 5 agents: {prob_sums[:5].tolist()}", flush=True)
 
-            # DEBUG #4: check for NaNs in probs
             if torch.isnan(probs_i).any():
-                print(f"[GraphMAC] env={env_i} probs_i has NaNs", flush=True)
+                nan_idx = torch.isnan(probs_i).nonzero(as_tuple=False)
+                print(f"[GraphMAC][FATAL] env={env_i} got NaNs in softmax probs at {nan_idx[:10].tolist()}", flush=True)
+                raise RuntimeError("NaNs in π(a|s) probability distribution!")
 
-            # sample one action per agent
-            chosen_i = self.action_selector.select_action(
-                probs_i, avail_i, t_env, test_mode
-            )  # → [A]
-
+            # 7) sample
+            chosen_i = self.action_selector.select_action(probs_i, avail_i, t_env, test_mode)
             all_chosen.append(chosen_i)
 
-        # stack back to [batch_size_run, A]
-        result = torch.stack(all_chosen, dim=0)
+        result = torch.stack(all_chosen, dim=0)  # [len(bs), A]
         print(f"[GraphMAC] returning result.shape={tuple(result.shape)}", flush=True)
         return result
+

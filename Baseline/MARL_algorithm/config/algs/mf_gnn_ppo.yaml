@@ -14,7 +14,7 @@ checkpoint_path: ""
 evaluate: False
 save_replay: False                      # Saving the replay of the model loaded from checkpoint_path (deprecated)
 local_results_path: "results"           # Path for local results
-use_wandb: True                         # Whether log results to wandb
+use_wandb: False                         # Whether log results to wandb
 wandb_project_name: "whittle_index"     # The project name of the wandb project
 use_tensorboard: False                  # Whether log results to tensorboard
 
@@ -61,16 +61,25 @@ hidden_dim: 128
 
 gamma: 0.985
 optim: "Adam"
-lr: 0.0005
+lr: 0.0001
+actor_lr: 5e-5
+critic_lr: 1e-4
 optim_alpha: 0.99
 optim_eps: 1e-5
-grad_norm_clip: 10
+grad_norm_clip: 1
+
+actor_clip: 1
+critic_clip: 5
+
+reward_scale: 1
+max_adv: 10
+max_ratio: 10
 
 critic_coef: 0.5
 entropy_coef: 0.01
 gae_lambda: 0.95
 mini_epochs: 2
-eps_clip: 0.15
+eps_clip: 0.05
 
 # ----------------------------------------------------------------------
 # ======== MF-GNN-specific Hyper-parameters ========
