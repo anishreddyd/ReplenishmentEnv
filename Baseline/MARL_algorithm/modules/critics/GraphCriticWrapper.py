@@ -20,11 +20,11 @@ class GraphCriticWrapper(nn.Module):
         #   "edge_attr":  Tensor[E, edge_dim],
         #   "batch":      Tensor[N]  # all zeros if single‐graph
         # }
-        self.edge_index = graph_data["edge_index"]
-        self.edge_attr  = graph_data["edge_attr"]
-        # The original batch vector (all zeros) we ignore, we'll rebuild per‐timestep
-        # since we pool one graph per environment.
-        # But keep N for device:
+        # Register edge tensors as buffers so they move with the module
+        self.register_buffer("edge_index", graph_data["edge_index"])
+        self.register_buffer("edge_attr",  graph_data["edge_attr"])
+        # The original batch vector (all zeros) we ignore, we'll rebuild per-timestep
+        # since we pool one graph per environment. Keep N for device bookkeeping
         self.register_buffer("_orig_batch", graph_data["batch"])
 
     def forward(self, batch):
@@ -35,6 +35,8 @@ class GraphCriticWrapper(nn.Module):
         # We'll build a batch_idx vector of length N that points
         # all nodes -> graph 0, and then use it repeatedly.
         batch_idx = torch.zeros(N, dtype=torch.long, device=obs.device)
+        edge_index = self.edge_index.to(obs.device)
+        edge_attr = self.edge_attr.to(obs.device)
 
         # Collect values for each timestep
         values = []
@@ -44,7 +46,7 @@ class GraphCriticWrapper(nn.Module):
             for b in range(B):
                 node_feats = x_t[b]   # [N, D]
                 # run the graph mixer; uses same edges for each env
-                v_b = self.gm(node_feats, self.edge_index, self.edge_attr, batch_idx)
+                v_b = self.gm(node_feats, edge_index, edge_attr, batch_idx)
                 vt.append(v_b)        # scalar per graph
             values.append(torch.stack(vt, dim=0))  # [B]
         # now values: list of T × [B] → stack → [B, T]
