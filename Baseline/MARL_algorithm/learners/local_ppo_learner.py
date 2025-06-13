@@ -95,7 +95,8 @@ class LocalPPOLearner:
                     old_values.append(self.critic.forward(batch, t=t))
                 old_values = torch.stack(old_values, dim=1).unsqueeze(-1)
             elif self.args.critic_type == "graph_mix":
-                old_values = self.critic(batch).unsqueeze(-1)
+                # GraphMix critic returns [B, T]; expand to [B, T, 1, 1]
+                old_values = self.critic(batch).unsqueeze(-1).unsqueeze(-1)
             else:
                 old_values = self.critic(batch)
 
@@ -125,7 +126,8 @@ class LocalPPOLearner:
                     values.append(self.critic.forward(batch, t=t))
                 values = torch.stack(values, dim=1).unsqueeze(-1)
             elif self.args.critic_type == "graph_mix":
-                values = self.critic(batch)[:, :-1].unsqueeze(-1)
+                # critic gives [B, T]; trim and expand dims
+                values = self.critic(batch)[:, :-1].unsqueeze(-1).unsqueeze(-1)
             else:
                 values = self.critic(batch)[:, :-1]
 
