@@ -31,7 +31,9 @@ class GraphMAC(nn.Module):
         avail_t = batch["avail_actions"][:, t]  # [B, A, n_actions]
         B, A, F = obs_t.shape
         x = obs_t.reshape(B * A, F)
-        ei, ea = self.env.get_graph()["edge_index"], self.env.get_graph()["edge_attr"]
+        g = self.env.get_graph()
+        ei = g["edge_index"].to(x.device)
+        ea = g["edge_attr"].to(x.device)
         batch_idx = torch.zeros(x.size(0), device=x.device, dtype=torch.long)
 
         logits, _ = self.model(x, ei, ea, batch_idx)
@@ -78,9 +80,9 @@ class GraphMAC(nn.Module):
         avail_baft = full_avail[bs]  # [len(bs), A, n_actions]
 
         # 3) static graph metadata
-        g         = self.env.get_graph()
-        edge_idx  = g["edge_index"]
-        edge_attr = g["edge_attr"]
+        g = self.env.get_graph()
+        edge_idx = g["edge_index"].to(full_obs.device)
+        edge_attr = g["edge_attr"].to(full_obs.device)
 
         all_chosen = []
         for batch_idx, env_i in enumerate(bs):
