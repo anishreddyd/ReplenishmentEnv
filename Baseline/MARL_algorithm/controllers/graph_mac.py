@@ -38,6 +38,9 @@ class GraphMAC(nn.Module):
 
         logits, _ = self.model(x, ei, ea, batch_idx)
         logits = logits.view(B, A, -1)
+        # clamp and sanitize logits to avoid NaNs/Infs after updates
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
+        logits = logits.clamp(-1e6, 1e6)
 
         # —— DEBUG HERE ——
         print(f"[GraphMAC‐TRAIN] t={t} logits.min={logits.min().item():.3f}, "
@@ -51,11 +54,16 @@ class GraphMAC(nn.Module):
             print(f"[GraphMAC‐TRAIN][ERROR] logits NaN at {idx.tolist()}", flush=True)
 
         pi = torch.softmax(logits, dim=-1)
+        pi = torch.nan_to_num(pi, nan=1e-10)
+        pi = pi / pi.sum(dim=-1, keepdim=True)
         if torch.isnan(pi).any():
             idx = torch.isnan(pi).nonzero(as_tuple=False)[:5]
             print(f"[GraphMAC‐TRAIN][ERROR] pi NaN at {idx.tolist()}", flush=True)
         else:
-            print(f"[GraphMAC-TRAIN] pi stats: min={pi.min().item():.3f}, max={pi.max().item():.3f}", flush=True)
+            print(
+                f"[GraphMAC-TRAIN] pi stats: min={pi.min().item():.3f}, max={pi.max().item():.3f}",
+                flush=True,
+            )
 
         return pi
 
@@ -118,6 +126,8 @@ class GraphMAC(nn.Module):
 
             # 6) softmax → probabilities
             probs_i = torch.softmax(logits_i, dim=-1)
+            probs_i = torch.nan_to_num(probs_i, nan=1e-10)
+            probs_i = probs_i / probs_i.sum(dim=-1, keepdim=True)
             prob_sums = probs_i.sum(dim=-1)  # should all be ~1
             print(f"[GraphMAC][DEBUG] env={env_i} probs sum first 5 agents: {prob_sums[:5].tolist()}", flush=True)
 
